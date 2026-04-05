@@ -1,0 +1,12 @@
+build/bin/
+*.so
+*.so.*
+*.dll
+*.dylib
+training/venv/
+training/data/
+frontend/node_modules/
+frontend/dist/
+*.test
+.DS_Store
+Thumbs.db
