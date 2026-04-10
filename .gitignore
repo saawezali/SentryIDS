@@ -1,3 +1,5 @@
 build/bin
 node_modules
 frontend/dist
+training/venv
+training/__pycache__
