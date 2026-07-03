@@ -2,7 +2,12 @@ module sentryids
 
 go 1.25.0
 
-require github.com/wailsapp/wails/v2 v2.12.0
+require (
+	github.com/google/gopacket v1.1.19
+	github.com/wailsapp/wails/v2 v2.12.0
+	github.com/yalue/onnxruntime_go v1.30.1
+	modernc.org/sqlite v1.48.2
+)
 
 require (
 	git.sr.ht/~jackmordaunt/go-toast/v2 v2.0.3 // indirect
@@ -39,7 +44,6 @@ require (
 	modernc.org/libc v1.70.0 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.11.0 // indirect
-	modernc.org/sqlite v1.48.2 // indirect
 )
 
 // replace github.com/wailsapp/wails/v2 v2.12.0 => /home/saawez/go/pkg/mod
