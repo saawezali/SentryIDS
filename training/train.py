@@ -11,7 +11,7 @@ from skl2onnx.common.data_types import FloatTensorType
 import warnings
 import os
 
-from preprocess import preprocess
+from preprocess import MODEL_DIR, preprocess
 
 warnings.filterwarnings("ignore")
 
@@ -56,7 +56,12 @@ def export_to_onnx(model, output_path):
     This shape must match the [41]float32 array our Go code sends to inference.
     """
     initial_type = [("float_input", FloatTensorType([None, 41]))]
-    onnx_model = convert_sklearn(model, "SentryIDS", initial_type)
+    onnx_model = convert_sklearn(
+        model,
+        "SentryIDS",
+        initial_type,
+        options={id(model): {"zipmap": False}},
+    )
 
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     with open(output_path, "wb") as f:
@@ -83,5 +88,5 @@ if __name__ == "__main__":
         models, X_train_balanced, y_train_balanced, X_test, y_test
     )
 
-    export_to_onnx(best_model, "../models/ids_model.onnx")
+    export_to_onnx(best_model, MODEL_DIR / "ids_model.onnx")
     print("\nTraining pipeline complete.")

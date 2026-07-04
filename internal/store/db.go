@@ -28,6 +28,7 @@ func Open(path string) (*DB, error) {
 	db := &DB{conn: conn}
 
 	if err := db.migrate(); err != nil {
+		conn.Close()
 		return nil, fmt.Errorf("running migrations: %w", err)
 	}
 

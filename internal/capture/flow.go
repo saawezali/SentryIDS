@@ -203,12 +203,13 @@ func (f *flowRecord) toFeatures() engine.Features {
 	v[40] = f.dstHostSrvRerrorRate
 
 	return engine.Features{
-		SrcIP:    f.key.SrcIP,
-		DstIP:    f.key.DstIP,
-		SrcPort:  f.key.SrcPort,
-		DstPort:  f.key.DstPort,
-		Protocol: f.key.Protocol,
-		Vector:   v,
+		SrcIP:       f.key.SrcIP,
+		DstIP:       f.key.DstIP,
+		SrcPort:     f.key.SrcPort,
+		DstPort:     f.key.DstPort,
+		Protocol:    f.key.Protocol,
+		PacketCount: f.srcPackets + f.dstPackets,
+		Vector:      v,
 	}
 }
 

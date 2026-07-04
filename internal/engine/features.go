@@ -43,11 +43,12 @@ func (c ClassLabel) Severity() string {
 }
 
 type Features struct {
-	SrcIP    string
-	DstIP    string
-	SrcPort  uint16
-	DstPort  uint16
-	Protocol string
+	SrcIP       string
+	DstIP       string
+	SrcPort     uint16
+	DstPort     uint16
+	Protocol    string
+	PacketCount int64
 
 	Vector [41]float32
 }

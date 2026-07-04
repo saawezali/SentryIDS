@@ -27,6 +27,7 @@ type Capturer struct {
 	outCh chan<- engine.Features
 	flows map[flowKey]*flowRecord
 	mu    sync.Mutex
+	wg    sync.WaitGroup
 }
 
 func New(iface string, outCh chan<- engine.Features) *Capturer {
@@ -38,7 +39,7 @@ func New(iface string, outCh chan<- engine.Features) *Capturer {
 }
 
 func (c *Capturer) Start(ctx context.Context) error {
-	handle, err := pcap.OpenLive(c.iface, snapshotLen, true, pcap.BlockForever)
+	handle, err := pcap.OpenLive(c.iface, snapshotLen, true, time.Second)
 	if err != nil {
 		return fmt.Errorf("opening interface %s: %w", c.iface, err)
 	}
@@ -48,9 +49,15 @@ func (c *Capturer) Start(ctx context.Context) error {
 		return fmt.Errorf("setting BPF filter: %w", err)
 	}
 
-	go c.packetLoop(ctx, handle)
-
-	go c.timeoutLoop(ctx)
+	c.wg.Add(2)
+	go func() {
+		defer c.wg.Done()
+		c.packetLoop(ctx, handle)
+	}()
+	go func() {
+		defer c.wg.Done()
+		c.timeoutLoop(ctx)
+	}()
 
 	return nil
 }
@@ -58,7 +65,7 @@ func (c *Capturer) Start(ctx context.Context) error {
 func (c *Capturer) packetLoop(ctx context.Context, handle *pcap.Handle) {
 	defer handle.Close()
 
-	src := gopacket.NewPacketSource(handle, layers.LinkTypeEthernet)
+	src := gopacket.NewPacketSource(handle, handle.LinkType())
 
 	for {
 		select {
@@ -73,6 +80,10 @@ func (c *Capturer) packetLoop(ctx context.Context, handle *pcap.Handle) {
 			c.handlePacket(packet)
 		}
 	}
+}
+
+func (c *Capturer) Wait() {
+	c.wg.Wait()
 }
 
 func (c *Capturer) handlePacket(packet gopacket.Packet) {
@@ -138,6 +149,18 @@ func (c *Capturer) handlePacket(packet gopacket.Packet) {
 	defer c.mu.Unlock()
 
 	flow, exists := c.flows[key]
+	reverseDirection := false
+	if !exists {
+		reverseKey := flowKey{
+			SrcIP: dstIP, DstIP: srcIP,
+			SrcPort: dstPort, DstPort: srcPort,
+			Protocol: proto,
+		}
+		if reverseFlow, reverseExists := c.flows[reverseKey]; reverseExists {
+			key, flow, exists = reverseKey, reverseFlow, true
+			reverseDirection = true
+		}
+	}
 	if !exists {
 		flow = &flowRecord{
 			key:       key,
@@ -155,8 +178,13 @@ func (c *Capturer) handlePacket(packet gopacket.Packet) {
 	}
 
 	flow.lastSeen = packet.Metadata().Timestamp
-	flow.srcBytes += int64(pktBytes)
-	flow.srcPackets++
+	if reverseDirection {
+		flow.dstBytes += int64(pktBytes)
+		flow.dstPackets++
+	} else {
+		flow.srcBytes += int64(pktBytes)
+		flow.srcPackets++
+	}
 
 	if urgFlag {
 		flow.urgent++
@@ -230,7 +258,7 @@ func (c *Capturer) finalise(key flowKey, flow *flowRecord) {
 
 func (c *Capturer) computeWindowFeatures(flow *flowRecord) {
 	cutoff := flow.lastSeen.Add(-2 * time.Second)
-	var sameDst, sameSrv, synErrors, rejErrors int
+	var sameDst, sameSrv, synErrors, srvSynErrors, rejErrors, srvRejErrors int
 
 	for _, f := range c.flows {
 		if f.lastSeen.Before(cutoff) {
@@ -240,6 +268,12 @@ func (c *Capturer) computeWindowFeatures(flow *flowRecord) {
 			sameDst++
 			if f.key.DstPort == flow.key.DstPort {
 				sameSrv++
+				if f.flag == "S0" || f.flag == "S1" {
+					srvSynErrors++
+				}
+				if f.flag == "REJ" {
+					srvRejErrors++
+				}
 			}
 			if f.flag == "S0" || f.flag == "S1" {
 				synErrors++
@@ -259,17 +293,37 @@ func (c *Capturer) computeWindowFeatures(flow *flowRecord) {
 		flow.sameSrvRate = float32(sameSrv) / float32(sameDst)
 		flow.diffSrvRate = 1 - flow.sameSrvRate
 	}
+	if sameSrv > 0 {
+		flow.srvSerrorRate = float32(srvSynErrors) / float32(sameSrv)
+		flow.srvRerrorRate = float32(srvRejErrors) / float32(sameSrv)
+	}
 
-	var hostCount, hostSrvCount, hostSynErr, hostRejErr int
+	var hostCount, hostSrvCount, sameSrcPort, hostSynErr, hostSrvSynErr, hostRejErr, hostSrvRejErr int
+	var serviceCount, serviceDifferentHost int
 	seen := 0
 	for _, f := range c.flows {
+		if f.key.DstPort == flow.key.DstPort {
+			serviceCount++
+			if f.key.DstIP != flow.key.DstIP {
+				serviceDifferentHost++
+			}
+		}
 		if f.key.DstIP != flow.key.DstIP || seen >= 100 {
 			continue
 		}
 		hostCount++
 		seen++
+		if f.key.SrcPort == flow.key.SrcPort {
+			sameSrcPort++
+		}
 		if f.key.DstPort == flow.key.DstPort {
 			hostSrvCount++
+			if f.flag == "S0" {
+				hostSrvSynErr++
+			}
+			if f.flag == "REJ" {
+				hostSrvRejErr++
+			}
 		}
 		if f.flag == "S0" {
 			hostSynErr++
@@ -287,6 +341,14 @@ func (c *Capturer) computeWindowFeatures(flow *flowRecord) {
 		flow.dstHostDiffSrvRate = 1 - flow.dstHostSameSrvRate
 		flow.dstHostSerrorRate = float32(hostSynErr) / float32(hostCount)
 		flow.dstHostRerrorRate = float32(hostRejErr) / float32(hostCount)
+		flow.dstHostSameSrcPortRate = float32(sameSrcPort) / float32(hostCount)
+	}
+	if hostSrvCount > 0 {
+		flow.dstHostSrvSerrorRate = float32(hostSrvSynErr) / float32(hostSrvCount)
+		flow.dstHostSrvRerrorRate = float32(hostSrvRejErr) / float32(hostSrvCount)
+	}
+	if serviceCount > 0 {
+		flow.dstHostSrvDiffHostRate = float32(serviceDifferentHost) / float32(serviceCount)
 	}
 }
 

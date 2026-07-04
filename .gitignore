@@ -1,5 +1,6 @@
 build/bin
 node_modules
-frontend/dist
+frontend/dist/*
+!frontend/dist/.gitkeep
 training/venv
 training/__pycache__

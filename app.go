@@ -1,12 +1,14 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"log"
 	"os"
 	"path/filepath"
 	"runtime"
+	"sync"
 
 	wailsRuntime "github.com/wailsapp/wails/v2/pkg/runtime"
 
@@ -17,13 +19,17 @@ import (
 )
 
 type App struct {
-	ctx        context.Context
-	cfg        config.Config
-	db         *store.DB
-	eng        *engine.Engine
-	capturer   *capture.Capturer
-	cancelFunc context.CancelFunc
-	running    bool
+	ctx          context.Context
+	cfg          config.Config
+	db           *store.DB
+	eng          *engine.Engine
+	capturer     *capture.Capturer
+	cancelFunc   context.CancelFunc
+	engineCancel context.CancelFunc
+	running      bool
+	stopping     bool
+	mu           sync.RWMutex
+	initErr      error
 }
 
 func NewApp() *App {
@@ -46,19 +52,30 @@ func (a *App) startup(ctx context.Context) {
 	dbPath := expandHome(cfg.DBPath)
 	db, err := store.Open(dbPath)
 	if err != nil {
-		log.Fatalf("opening database: %v", err)
+		a.initErr = fmt.Errorf("opening database: %w", err)
+		log.Printf("%v", a.initErr)
+		return
 	}
 	a.db = db
 
+	ortPath, err := prepareORTLibrary()
+	if err != nil {
+		a.initErr = fmt.Errorf("preparing ONNX Runtime: %w", err)
+		log.Printf("%v", a.initErr)
+		return
+	}
 	eng, err := engine.New(engine.Config{
-		OrtLibPath:          ortLibPath(),
-		ScalerPath:          "models/scaler_params.json",
+		OrtLibPath:          ortPath,
+		ScalerData:          scalerData,
+		ModelData:           modelData,
 		ConfidenceThreshold: float32(cfg.ConfidenceThreshold),
 		InputBufferSize:     512,
 		Store:               db,
 	})
 	if err != nil {
-		log.Fatalf("initialising engine: %v", err)
+		a.initErr = fmt.Errorf("initialising engine: %w", err)
+		log.Printf("%v", a.initErr)
+		return
 	}
 	a.eng = eng
 
@@ -78,21 +95,37 @@ func (a *App) shutdown(ctx context.Context) {
 }
 
 func (a *App) StartCapture(iface string) string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
 	if a.running {
 		return "capture already running"
 	}
+	if a.stopping {
+		return "capture is still stopping"
+	}
 
-	captureCtx, cancel := context.WithCancel(context.Background())
-	a.cancelFunc = cancel
+	if a.eng == nil {
+		if a.initErr != nil {
+			return a.initErr.Error()
+		}
+		return "detection engine is unavailable"
+	}
+	engineCtx, engineCancel := context.WithCancel(context.Background())
+	captureCtx, captureCancel := context.WithCancel(context.Background())
+	a.cancelFunc = captureCancel
+	a.engineCancel = engineCancel
 
-	if err := a.eng.Start(captureCtx, iface, "live"); err != nil {
-		cancel()
+	if err := a.eng.Start(engineCtx, iface, "live"); err != nil {
+		captureCancel()
+		engineCancel()
 		return fmt.Sprintf("starting engine: %v", err)
 	}
 
 	a.capturer = capture.New(iface, a.eng.InputChannel())
 	if err := a.capturer.Start(captureCtx); err != nil {
-		cancel()
+		captureCancel()
+		engineCancel()
+		a.eng.Wait()
 		return fmt.Sprintf("starting capture on %s: %v", iface, err)
 	}
 
@@ -103,36 +136,75 @@ func (a *App) StartCapture(iface string) string {
 }
 
 func (a *App) StopCapture() {
-	if !a.running {
+	a.mu.Lock()
+	if !a.running || a.stopping {
+		a.mu.Unlock()
 		return
 	}
-	a.cancelFunc()
+	a.stopping = true
+	captureCancel := a.cancelFunc
+	engineCancel := a.engineCancel
+	capturer := a.capturer
+	a.mu.Unlock()
+
+	// Let capture flush completed flows before stopping the engine consumer.
+	captureCancel()
+	capturer.Wait()
+	engineCancel()
+	a.eng.Wait()
+
+	a.mu.Lock()
 	a.running = false
+	a.stopping = false
 	a.capturer = nil
+	a.cancelFunc = nil
+	a.engineCancel = nil
+	a.mu.Unlock()
 	wailsRuntime.EventsEmit(a.ctx, "capture:stopped", nil)
 }
 
 func (a *App) GetRecentAlerts(limit int) ([]store.Alert, error) {
+	if a.db == nil {
+		return nil, fmt.Errorf("database is unavailable")
+	}
+	if limit < 1 || limit > 1000 {
+		return nil, fmt.Errorf("limit must be between 1 and 1000")
+	}
 	return a.db.RecentAlerts(limit)
 }
 
 func (a *App) GetAlertCounts() (map[string]int, error) {
+	if a.db == nil {
+		return nil, fmt.Errorf("database is unavailable")
+	}
 	return a.db.AlertCountByType()
 }
 
 func (a *App) GetConfig() config.Config {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
 	return a.cfg
 }
 
 func (a *App) SaveConfig(cfg config.Config) string {
-	a.cfg = cfg
+	if err := config.Validate(cfg); err != nil {
+		return err.Error()
+	}
 	if err := config.Save(cfg, configPath()); err != nil {
 		return err.Error()
 	}
+	a.mu.Lock()
+	a.cfg = cfg
+	if a.eng != nil {
+		a.eng.SetThreshold(float32(cfg.ConfidenceThreshold))
+	}
+	a.mu.Unlock()
 	return ""
 }
 
 func (a *App) IsRunning() bool {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
 	return a.running
 }
 
@@ -163,13 +235,29 @@ func expandHome(path string) string {
 	return path
 }
 
-func ortLibPath() string {
+func prepareORTLibrary() (string, error) {
 	switch runtime.GOOS {
-	case "windows":
-		return "lib/onnxruntime.dll"
-	case "darwin":
-		return "lib/libonnxruntime.dylib"
+	case "linux":
+		if len(linuxORTData) == 0 {
+			return "", fmt.Errorf("embedded ONNX Runtime library is empty")
+		}
+		cacheDir, err := os.UserCacheDir()
+		if err != nil {
+			return "", err
+		}
+		dir := filepath.Join(cacheDir, "sentryids")
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			return "", err
+		}
+		path := filepath.Join(dir, "libonnxruntime.so")
+		if existing, err := os.ReadFile(path); err == nil && bytes.Equal(existing, linuxORTData) {
+			return path, nil
+		}
+		if err := os.WriteFile(path, linuxORTData, 0755); err != nil {
+			return "", err
+		}
+		return path, nil
 	default:
-		return "lib/libonnxruntime.so"
+		return "", fmt.Errorf("%s is not supported by this build", runtime.GOOS)
 	}
 }

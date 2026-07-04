@@ -22,6 +22,10 @@ func LoadScaler(path string) (*Scaler, error) {
 		return nil, fmt.Errorf("reading scaler params: %w", err)
 	}
 
+	return LoadScalerData(data)
+}
+
+func LoadScalerData(data []byte) (*Scaler, error) {
 	var raw scalerJSON
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return nil, fmt.Errorf("parsing scaler params: %w", err)

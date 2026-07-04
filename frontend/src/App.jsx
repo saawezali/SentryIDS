@@ -6,6 +6,7 @@ import {
   GetAlertCounts,
   ListInterfaces,
   IsRunning,
+  GetConfig,
 } from "../wailsjs/go/main/App";
 import { EventsOn } from "../wailsjs/runtime/runtime";
 import ControlBar from "./components/ControlBar";
@@ -19,17 +20,27 @@ export default function App() {
   const [alerts, setAlerts]         = useState([]);
   const [counts, setCounts]         = useState({});
   const [error, setError]           = useState("");
+  const [maxAlerts, setMaxAlerts]   = useState(200);
 
   useEffect(() => {
-    ListInterfaces().then(setInterfaces).catch(console.error);
-    IsRunning().then(setRunning);
-    GetRecentAlerts(100).then(setAlerts).catch(console.error);
-    GetAlertCounts().then(setCounts).catch(console.error);
+    const reportError = (err) => setError(String(err));
+    Promise.all([ListInterfaces(), GetConfig()]).then(([available, cfg]) => {
+      setInterfaces(available);
+      const preferred = available.includes(cfg.default_interface)
+        ? cfg.default_interface
+        : (available[0] || "");
+      setIface(preferred);
+      setMaxAlerts(cfg.max_alerts_in_memory || 200);
+      document.documentElement.dataset.theme = cfg.theme || "dark";
+    }).catch(reportError);
+    IsRunning().then(setRunning).catch(reportError);
+    GetRecentAlerts(100).then(setAlerts).catch(reportError);
+    GetAlertCounts().then(setCounts).catch(reportError);
   }, []);
 
   useEffect(() => {
     const unsubAlert = EventsOn("alert:new", (alert) => {
-      setAlerts((prev) => [alert, ...prev].slice(0, 200));
+      setAlerts((prev) => [alert, ...prev].slice(0, maxAlerts));
       setCounts((prev) => ({
         ...prev,
         [alert.AttackType]: (prev[alert.AttackType] || 0) + 1,
@@ -44,7 +55,7 @@ export default function App() {
       unsubStarted();
       unsubStopped();
     };
-  }, []);
+  }, [maxAlerts]);
 
   const handleStart = async () => {
     setError("");

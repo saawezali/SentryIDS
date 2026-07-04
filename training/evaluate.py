@@ -4,7 +4,7 @@ from sklearn.metrics import f1_score, confusion_matrix
 import seaborn as sns
 import matplotlib.pyplot as plt
 
-from preprocess import preprocess
+from preprocess import BASE_DIR, MODEL_DIR, preprocess
 
 
 def verify_parity(sklearn_model, onnx_path, X_test):
@@ -44,12 +44,12 @@ def plot_confusion_matrix(y_true, y_pred, title="Confusion Matrix"):
     plt.ylabel("True Label")
     plt.xlabel("Predicted Label")
     plt.tight_layout()
-    plt.savefig("confusion_matrix.png", dpi=150)
+    plt.savefig(BASE_DIR / "confusion_matrix.png", dpi=150)
     print("Saved confusion_matrix.png")
 
 
 if __name__ == "__main__":
-    from train import train_and_evaluate
+    from train import export_to_onnx, train_and_evaluate
     from preprocess import preprocess
     from imblearn.over_sampling import SMOTE
     from sklearn.ensemble import RandomForestClassifier
@@ -73,8 +73,12 @@ if __name__ == "__main__":
         models, X_train_bal, y_train_bal, X_test, y_test
     )
 
+    # Evaluate the model selected in this run, not a stale file from an older run.
+    model_path = MODEL_DIR / "ids_model.onnx"
+    export_to_onnx(best_model, model_path)
+
     print("\nRunning parity check...")
-    onnx_preds = verify_parity(best_model, "../models/ids_model.onnx", X_test)
+    onnx_preds = verify_parity(best_model, model_path, X_test)
 
     macro_f1 = f1_score(y_test, onnx_preds, average="macro")
     print(f"ONNX model macro F1 on test set: {macro_f1:.4f}")

@@ -5,7 +5,7 @@ go 1.25.0
 require (
 	github.com/google/gopacket v1.1.19
 	github.com/wailsapp/wails/v2 v2.12.0
-	github.com/yalue/onnxruntime_go v1.30.1
+	github.com/yalue/onnxruntime_go v1.12.1
 	modernc.org/sqlite v1.48.2
 )
 

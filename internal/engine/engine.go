@@ -4,17 +4,13 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"os"
+	"sync"
 	"time"
-
-	_ "embed"
 
 	"sentryids/internal/store"
 
 	ort "github.com/yalue/onnxruntime_go"
 )
-
-var modelData []byte
 
 type Engine struct {
 	session   *ort.DynamicAdvancedSession
@@ -22,15 +18,16 @@ type Engine struct {
 	store     store.Store
 	inputCh   chan Features
 	alertCh   chan store.Alert
-	sessionID int64
-	packets   int64
-	alerts    int64
 	threshold float32
+	wg        sync.WaitGroup
+	mu        sync.RWMutex
 }
 
 type Config struct {
 	OrtLibPath          string
 	ScalerPath          string
+	ScalerData          []byte
+	ModelData           []byte
 	ConfidenceThreshold float32
 	InputBufferSize     int
 	Store               store.Store
@@ -42,35 +39,25 @@ func New(cfg Config) (*Engine, error) {
 		return nil, fmt.Errorf("initialising ORT environment: %w", err)
 	}
 
-	scaler, err := LoadScaler(cfg.ScalerPath)
+	var scaler *Scaler
+	var err error
+	if len(cfg.ScalerData) > 0 {
+		scaler, err = LoadScalerData(cfg.ScalerData)
+	} else {
+		scaler, err = LoadScaler(cfg.ScalerPath)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("loading scaler: %w", err)
 	}
 
-	tmpFile, err := os.CreateTemp("", "sentryids-model-*.onnx")
-	if err != nil {
-		return nil, fmt.Errorf("creating temp model file: %w", err)
+	if len(cfg.ModelData) == 0 {
+		return nil, fmt.Errorf("model data is empty")
 	}
 
-	tmpPath := tmpFile.Name()
-
-	if _, err := tmpFile.Write(modelData); err != nil {
-		tmpFile.Close()
-		os.Remove(tmpPath)
-		return nil, fmt.Errorf("writing temp model file: %w", err)
-	}
-
-	if err := tmpFile.Close(); err != nil {
-		os.Remove(tmpPath)
-		return nil, fmt.Errorf("closing temp model file: %w", err)
-	}
-
-	defer os.Remove(tmpPath)
-
-	session, err := ort.NewDynamicAdvancedSession(
-		tmpPath,
+	session, err := ort.NewDynamicAdvancedSessionWithONNXData(
+		cfg.ModelData,
 		[]string{"float_input"},
-		[]string{"output_label", "output_probability"},
+		[]string{"label", "probabilities"},
 		nil,
 	)
 	if err != nil {
@@ -100,13 +87,12 @@ func (e *Engine) Start(ctx context.Context, iface, sourceType string) error {
 	if err != nil {
 		return fmt.Errorf("starting session: %w", err)
 	}
-	e.sessionID = id
-	e.packets = 0
-	e.alerts = 0
-
+	e.wg.Add(1)
 	go func() {
+		defer e.wg.Done()
+		var packets, alerts int64
 		defer func() {
-			if err := e.store.EndSession(e.sessionID, e.packets, e.alerts); err != nil {
+			if err := e.store.EndSession(id, packets, alerts); err != nil {
 				log.Printf("ending session: %v", err)
 			}
 		}()
@@ -117,8 +103,10 @@ func (e *Engine) Start(ctx context.Context, iface, sourceType string) error {
 				if !ok {
 					return
 				}
-				e.packets++
-				e.process(feat)
+				packets += feat.PacketCount
+				if e.process(feat) {
+					alerts++
+				}
 
 			case <-ctx.Done():
 				return
@@ -129,47 +117,18 @@ func (e *Engine) Start(ctx context.Context, iface, sourceType string) error {
 	return nil
 }
 
-func (e *Engine) process(feat Features) {
-	vec := feat.Vector
-	e.scaler.Transform(&vec)
-
-	inputTensor, err := ort.NewTensor(ort.NewShape(1, 41), vec[:])
-	if err != nil {
-		log.Printf("creating input tensor: %v", err)
-		return
-	}
-	defer inputTensor.Destroy()
-
-	labelTensor, err := ort.NewEmptyTensor[int64](ort.NewShape(1))
-	if err != nil {
-		log.Printf("creating label tensor: %v", err)
-		return
-	}
-	defer labelTensor.Destroy()
-
-	probTensor, err := ort.NewEmptyTensor[float32](ort.NewShape(1, 5))
-	if err != nil {
-		log.Printf("creating prob tensor: %v", err)
-		return
-	}
-	defer probTensor.Destroy()
-
-	err = e.session.Run(
-		[]ort.ArbitraryTensor{inputTensor},
-		[]ort.ArbitraryTensor{labelTensor, probTensor},
-	)
+func (e *Engine) process(feat Features) bool {
+	label, confidence, err := e.Predict(feat)
 	if err != nil {
 		log.Printf("running inference: %v", err)
-		return
+		return false
 	}
 
-	labelIdx := labelTensor.GetData()[0]
-	probs := probTensor.GetData()
-	label := ClassLabel(labelIdx)
-	confidence := probs[labelIdx]
-
-	if label == Normal || confidence < e.threshold {
-		return
+	e.mu.RLock()
+	threshold := e.threshold
+	e.mu.RUnlock()
+	if label == Normal || confidence < threshold {
+		return false
 	}
 
 	alert := store.Alert{
@@ -186,14 +145,103 @@ func (e *Engine) process(feat Features) {
 
 	if err := e.store.InsertAlert(&alert); err != nil {
 		log.Printf("inserting alert: %v", err)
-		return
+		return false
 	}
-	e.alerts++
 
 	select {
 	case e.alertCh <- alert:
 	default:
 	}
+	return true
+}
+
+// Predict scales one extracted flow and runs it through the loaded model.
+func (e *Engine) Predict(feat Features) (ClassLabel, float32, error) {
+	vec := feat.Vector
+	e.scaler.Transform(&vec)
+
+	inputTensor, err := ort.NewTensor(ort.NewShape(1, 41), vec[:])
+	if err != nil {
+		return Normal, 0, fmt.Errorf("creating input tensor: %w", err)
+	}
+	defer inputTensor.Destroy()
+
+	labelTensor, err := ort.NewEmptyTensor[int64](ort.NewShape(1))
+	if err != nil {
+		return Normal, 0, fmt.Errorf("creating label tensor: %w", err)
+	}
+	defer labelTensor.Destroy()
+
+	outputs := []ort.Value{labelTensor, nil}
+	err = e.session.Run(
+		[]ort.ArbitraryTensor{inputTensor},
+		outputs,
+	)
+	if err != nil {
+		return Normal, 0, err
+	}
+	defer outputs[1].Destroy()
+
+	labelIdx := labelTensor.GetData()[0]
+	label := ClassLabel(labelIdx)
+	confidence, err := probabilityForLabel(outputs[1], labelIdx)
+	if err != nil {
+		return Normal, 0, fmt.Errorf("reading inference probabilities: %w", err)
+	}
+	if label < Normal || label > U2R {
+		return Normal, 0, fmt.Errorf("model returned unknown class %d", labelIdx)
+	}
+	return label, confidence, nil
+}
+
+func probabilityForLabel(value ort.Value, label int64) (float32, error) {
+	if probabilities, ok := value.(*ort.Tensor[float32]); ok {
+		data := probabilities.GetData()
+		if label < 0 || int(label) >= len(data) {
+			return 0, fmt.Errorf("predicted label %d is outside probability tensor", label)
+		}
+		return data[label], nil
+	}
+	sequence, ok := value.(*ort.Sequence)
+	if !ok {
+		return 0, fmt.Errorf("expected probability sequence, got %T", value)
+	}
+	items, err := sequence.GetValues()
+	if err != nil || len(items) != 1 {
+		return 0, fmt.Errorf("expected one probability map, got %d: %w", len(items), err)
+	}
+	probMap, ok := items[0].(*ort.Map)
+	if !ok {
+		return 0, fmt.Errorf("expected probability map, got %T", items[0])
+	}
+	keysValue, probabilitiesValue, err := probMap.GetKeysAndValues()
+	if err != nil {
+		return 0, err
+	}
+	keys, ok := keysValue.(*ort.Tensor[int64])
+	if !ok {
+		return 0, fmt.Errorf("expected int64 probability keys, got %T", keysValue)
+	}
+	probabilities, ok := probabilitiesValue.(*ort.Tensor[float32])
+	if !ok {
+		return 0, fmt.Errorf("expected float32 probabilities, got %T", probabilitiesValue)
+	}
+	for i, key := range keys.GetData() {
+		if key == label && i < len(probabilities.GetData()) {
+			return probabilities.GetData()[i], nil
+		}
+	}
+	return 0, fmt.Errorf("predicted label %d missing from probabilities", label)
+}
+
+func (e *Engine) Wait() {
+	e.wg.Wait()
+}
+
+func (e *Engine) SetThreshold(threshold float32) {
+	e.mu.Lock()
+	e.threshold = threshold
+	e.mu.Unlock()
 }
 
 func (e *Engine) Stop() error {

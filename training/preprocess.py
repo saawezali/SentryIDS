@@ -3,6 +3,10 @@ import numpy as np
 from sklearn.preprocessing import StandardScaler
 import json
 import os
+from pathlib import Path
+
+BASE_DIR = Path(__file__).resolve().parent
+MODEL_DIR = BASE_DIR.parent / "models"
 
 COLUMNS = [
     "duration", "protocol_type", "service", "flag", "src_bytes", "dst_bytes",
@@ -57,7 +61,7 @@ LABEL_MAP = {
     "httptunnel": 3, "snmpguess": 3, "rusersd": 3, "rsh": 3,
     "sqlattack": 3, "xterm": 3,
     "buffer_overflow": 4, "loadmodule": 4, "rootkit": 4, "perl": 4,
-    "ps": 4, "httptunnel": 4,
+    "ps": 4,
 }
 
 
@@ -88,11 +92,16 @@ def encode_labels(df):
     """Collapse specific attack names into the five class indices."""
     labels = df["label"].str.strip().str.lower().map(LABEL_MAP)
 
-    labels = labels.fillna(0).astype(int)
+
+    if labels.isna().any():
+        unknown = sorted(df.loc[labels.isna(), "label"].astype(str).unique())
+        raise ValueError(f"Unknown attack labels: {unknown}")
+
+    labels = labels.astype(int)
     return labels
 
 
-def preprocess(train_path="KDDTrain+.txt", test_path="KDDTest+.txt"):
+def preprocess(train_path=BASE_DIR / "KDDTrain+.txt", test_path=BASE_DIR / "KDDTest+.txt"):
     print("Loading datasets...")
     train_df = load_dataset(train_path)
     test_df  = load_dataset(test_path)
@@ -115,12 +124,12 @@ def preprocess(train_path="KDDTrain+.txt", test_path="KDDTest+.txt"):
     X_train_scaled = scaler.fit_transform(X_train)
     X_test_scaled  = scaler.transform(X_test)
 
-    os.makedirs("../models", exist_ok=True)
+    os.makedirs(MODEL_DIR, exist_ok=True)
     scaler_params = {
         "mean":  scaler.mean_.tolist(),
         "scale": scaler.scale_.tolist(),
     }
-    with open("../models/scaler_params.json", "w") as f:
+    with open(MODEL_DIR / "scaler_params.json", "w") as f:
         json.dump(scaler_params, f, indent=2)
     print("Saved scaler_params.json")
 

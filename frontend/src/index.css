@@ -12,6 +12,24 @@
   --ok:        #22c55e;
 }
 
+:root[data-theme="light"] {
+  --bg: #f8fafc;
+  --surface: #ffffff;
+  --border: #dbe2ea;
+  --text: #172033;
+  --muted: #64748b;
+}
+
+@media (prefers-color-scheme: light) {
+  :root[data-theme="system"] {
+    --bg: #f8fafc;
+    --surface: #ffffff;
+    --border: #dbe2ea;
+    --text: #172033;
+    --muted: #64748b;
+  }
+}
+
 body {
   background: var(--bg);
   color: var(--text);
@@ -122,3 +140,8 @@ body {
 .badge--medium   { background: rgba(249,115,22,.2);  color: #f97316; }
 
 .empty { color: var(--muted); font-size: .85rem; padding: 1rem 0; }
+
+@media (max-width: 850px) {
+  .panels { grid-template-columns: 1fr; overflow-y: auto; }
+  .panel--table { min-height: 360px; }
+}
