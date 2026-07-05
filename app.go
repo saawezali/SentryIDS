@@ -190,6 +190,21 @@ func (a *App) SaveConfig(cfg config.Config) string {
 	if err := config.Validate(cfg); err != nil {
 		return err.Error()
 	}
+	if cfg.DefaultInterface != "" {
+		available, err := capture.FindInterfaces()
+		if err == nil {
+			found := false
+			for _, iface := range available {
+				if iface == cfg.DefaultInterface {
+					found = true
+					break
+				}
+			}
+			if !found {
+				return fmt.Sprintf("interface %q not found", cfg.DefaultInterface)
+			}
+		}
+	}
 	if err := config.Save(cfg, configPath()); err != nil {
 		return err.Error()
 	}
@@ -217,8 +232,17 @@ func (a *App) ListInterfaces() ([]string, error) {
 }
 
 func (a *App) forwardAlerts() {
-	for alert := range a.eng.AlertChannel() {
-		wailsRuntime.EventsEmit(a.ctx, "alert:new", alert)
+	for {
+		select {
+		case alert, ok := <-a.eng.AlertChannel():
+			if !ok {
+				return
+			}
+			wailsRuntime.EventsEmit(a.ctx, "alert:new", alert)
+
+		case <-a.eng.Done():
+			return
+		}
 	}
 }
 

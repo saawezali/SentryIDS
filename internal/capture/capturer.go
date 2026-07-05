@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"sort"
 	"sync"
 	"time"
 
@@ -20,6 +21,10 @@ const (
 	flowTimeout = 30 * time.Second
 
 	tickInterval = 5 * time.Second
+
+	maxFlows = 50000
+
+	evictBatch = 5000
 )
 
 type Capturer struct {
@@ -97,15 +102,15 @@ func (c *Capturer) handlePacket(packet gopacket.Packet) {
 	dstIP := netFlow.Dst().String()
 
 	var (
-		srcPort     uint16
-		dstPort     uint16
-		proto       string
-		pktBytes    int
-		synFlag     bool
-		finFlag     bool
-		rstFlag     bool
-		urgFlag     bool
-		established bool
+		srcPort  uint16
+		dstPort  uint16
+		proto    string
+		pktBytes int
+		synFlag  bool
+		ackFlag  bool
+		finFlag  bool
+		rstFlag  bool
+		urgFlag  bool
 	)
 
 	pktBytes = len(packet.Data())
@@ -116,10 +121,10 @@ func (c *Capturer) handlePacket(packet gopacket.Packet) {
 		srcPort = uint16(t.SrcPort)
 		dstPort = uint16(t.DstPort)
 		synFlag = t.SYN
+		ackFlag = t.ACK
 		finFlag = t.FIN
 		rstFlag = t.RST
 		urgFlag = t.URG
-		established = t.ACK && !t.SYN
 
 	case *layers.UDP:
 		proto = "udp"
@@ -162,6 +167,10 @@ func (c *Capturer) handlePacket(packet gopacket.Packet) {
 		}
 	}
 	if !exists {
+		if len(c.flows) >= maxFlows {
+			c.evictOldest()
+		}
+
 		flow = &flowRecord{
 			key:       key,
 			startTime: packet.Metadata().Timestamp,
@@ -189,7 +198,9 @@ func (c *Capturer) handlePacket(packet gopacket.Packet) {
 	if urgFlag {
 		flow.urgent++
 	}
-	if synFlag {
+	if synFlag && ackFlag {
+		flow.synAckCount++
+	} else if synFlag {
 		flow.synCount++
 	}
 	if finFlag {
@@ -198,6 +209,8 @@ func (c *Capturer) handlePacket(packet gopacket.Packet) {
 	if rstFlag {
 		flow.rstCount++
 	}
+
+	established := flow.synCount > 0 && flow.synAckCount > 0
 
 	if proto == "tcp" && finFlag && established {
 		flow.flag = tcpFlagString(flow.synCount, flow.finCount, flow.rstCount, true)
@@ -358,4 +371,34 @@ func (c *Capturer) flushAll() {
 	for key, flow := range c.flows {
 		c.finalise(key, flow)
 	}
+}
+
+func (c *Capturer) evictOldest() {
+	if len(c.flows) < maxFlows {
+		return
+	}
+
+	type entry struct {
+		key  flowKey
+		last time.Time
+	}
+	oldest := make([]entry, 0, evictBatch)
+
+	for k, f := range c.flows {
+		oldest = append(oldest, entry{k, f.lastSeen})
+	}
+
+	sort.Slice(oldest, func(i, j int) bool {
+		return oldest[i].last.Before(oldest[j].last)
+	})
+
+	n := evictBatch
+	if n > len(oldest) {
+		n = len(oldest)
+	}
+	for _, o := range oldest[:n] {
+		c.finalise(o.key, c.flows[o.key])
+	}
+
+	log.Printf("capture: evicted %d oldest flows (map size %d)", n, len(c.flows))
 }

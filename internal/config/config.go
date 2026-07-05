@@ -70,5 +70,5 @@ func Save(cfg Config, path string) error {
 		return err
 	}
 
-	return os.WriteFile(path, data, 0644)
+	return os.WriteFile(path, data, 0600)
 }

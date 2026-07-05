@@ -50,7 +50,18 @@ func TestReversePacketsJoinTheSameFlow(t *testing.T) {
 func TestFeatureEncodingMatchesTrainingMaps(t *testing.T) {
 	flow := &flowRecord{key: flowKey{Protocol: "tcp"}, service: "http_443", flag: "SF"}
 	features := flow.toFeatures()
-	if features.Vector[1] != 0 || features.Vector[2] != 15 || features.Vector[3] != 0 {
-		t.Fatalf("unexpected categorical encoding: %v", features.Vector[:4])
+
+	wantProto := protoCode["tcp"]
+	wantSvc := serviceCode["http_443"]
+	wantFlag := flagCode["SF"]
+
+	if features.Vector[1] != wantProto {
+		t.Errorf("protocol: got %v, want %v", features.Vector[1], wantProto)
+	}
+	if features.Vector[2] != wantSvc {
+		t.Errorf("service: got %v, want %v", features.Vector[2], wantSvc)
+	}
+	if features.Vector[3] != wantFlag {
+		t.Errorf("flag: got %v, want %v", features.Vector[3], wantFlag)
 	}
 }

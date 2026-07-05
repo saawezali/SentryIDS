@@ -23,9 +23,16 @@ func Open(path string) (*DB, error) {
 		return nil, fmt.Errorf("opening sqlite: %w", err)
 	}
 
-	conn.SetMaxOpenConns(1)
+	conn.SetMaxOpenConns(4)
+	conn.SetMaxIdleConns(2)
 
 	db := &DB{conn: conn}
+
+	// Enable WAL mode for concurrent reads during writes
+	if _, err := conn.Exec("PRAGMA journal_mode=WAL"); err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("enabling WAL mode: %w", err)
+	}
 
 	if err := db.migrate(); err != nil {
 		conn.Close()

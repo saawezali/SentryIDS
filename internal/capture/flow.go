@@ -1,7 +1,6 @@
 package capture
 
 import (
-	"net"
 	"time"
 
 	"sentryids/internal/engine"
@@ -26,10 +25,10 @@ type flowRecord struct {
 	srcPackets int64
 	dstPackets int64
 
-	synCount int
-	finCount int
-	rstCount int
-	urgCount int
+	synCount    int
+	synAckCount int
+	finCount    int
+	rstCount    int
 
 	wrongFragments int
 	urgent         int
@@ -62,6 +61,9 @@ type flowRecord struct {
 }
 
 func serviceFromPort(port uint16, proto string) string {
+	if port == 0 && proto == "icmp" {
+		return "icmp"
+	}
 	if proto == "udp" {
 		switch port {
 		case 53:
@@ -70,6 +72,12 @@ func serviceFromPort(port uint16, proto string) string {
 			return "ntp_u"
 		case 69:
 			return "tftp_u"
+		case 137:
+			return "netbios_ns"
+		case 138:
+			return "netbios_dgm"
+		case 32773:
+			return "pm_dump"
 		}
 		return "other"
 	}
@@ -90,14 +98,28 @@ func serviceFromPort(port uint16, proto string) string {
 		return "http_443"
 	case 110:
 		return "pop_3"
+	case 109:
+		return "pop_2"
 	case 143:
 		return "imap4"
 	case 389:
 		return "ldap"
+	case 113:
+		return "auth"
+	case 53:
+		return "domain"
+	case 512:
+		return "exec"
 	case 513:
 		return "login"
 	case 514:
 		return "shell"
+	case 515:
+		return "printer"
+	case 543:
+		return "klogin"
+	case 544:
+		return "kshell"
 	case 37:
 		return "time"
 	case 79:
@@ -112,10 +134,40 @@ func serviceFromPort(port uint16, proto string) string {
 		return "discard"
 	case 7:
 		return "echo"
+	case 11:
+		return "systat"
+	case 70:
+		return "gopher"
+	case 95:
+		return "supdup"
+	case 101:
+		return "hostnames"
+	case 102:
+		return "iso_tsap"
+	case 105:
+		return "csnet_ns"
 	case 111:
 		return "sunrpc"
+	case 120:
+		return "nnsp"
+	case 139:
+		return "netbios_ssn"
+	case 245:
+		return "link"
+	case 520:
+		return "efs"
+	case 530:
+		return "courier"
+	case 6000:
+		return "X11"
+	case 6667:
+		return "IRC"
 	case 1521:
 		return "sql_net"
+	case 2784:
+		return "http_2784"
+	case 8001:
+		return "http_8001"
 	}
 	return "other"
 }
@@ -137,23 +189,36 @@ func tcpFlagString(syn, fin, rst int, established bool) string {
 	}
 }
 
+var protoCode = map[string]float32{"tcp": 0, "udp": 1, "icmp": 2}
+
+var serviceCode = map[string]float32{
+	"http": 0, "ftp": 1, "smtp": 2, "ssh": 3, "dns": 4,
+	"ftp_data": 5, "mtp": 6, "finger": 7, "telnet": 8, "eco_i": 9,
+	"other": 10, "private": 11, "domain_u": 12, "auth": 13,
+	"ntp_u": 14, "http_443": 15, "Z39_50": 16, "ldap": 17,
+	"klogin": 18, "kshell": 19, "imap4": 20, "pop_3": 21,
+	"pop_2": 22, "systat": 23, "sunrpc": 24, "gopher": 25,
+	"uucp": 26, "netstat": 27, "nntp": 28, "whois": 29,
+	"shell": 30, "courier": 31, "csnet_ns": 32, "ctf": 33,
+	"daytime": 34, "discard": 35, "domain": 36, "echo": 37,
+	"efs": 38, "exec": 39, "hostnames": 40, "http_2784": 41,
+	"http_8001": 42, "iso_tsap": 43, "link": 44, "login": 45,
+	"name": 46, "netbios_dgm": 47, "netbios_ns": 48,
+	"netbios_ssn": 49, "nnsp": 50, "pm_dump": 51, "printer": 52,
+	"remote_job": 53, "rje": 54, "sql_net": 55, "supdup": 56,
+	"time": 57, "tim_i": 58, "urh_i": 59, "urp_i": 60,
+	"uucp_path": 61, "vmnet": 62, "X11": 63, "IRC": 64,
+	"harvest": 65, "aol": 66, "red_i": 67, "tftp_u": 68,
+	"icmp": 69,
+}
+
+var flagCode = map[string]float32{
+	"SF": 0, "S0": 1, "REJ": 2, "RSTO": 3, "RSTS": 4,
+	"SH": 5, "S1": 6, "S2": 7, "S3": 8, "OTH": 9,
+}
+
 func (f *flowRecord) toFeatures() engine.Features {
 	duration := f.lastSeen.Sub(f.startTime).Seconds()
-
-	protoCode := map[string]float32{"tcp": 0, "udp": 1, "icmp": 2}
-	serviceCode := map[string]float32{
-		"http": 0, "ftp": 1, "smtp": 2, "ssh": 3, "dns": 4,
-		"ftp_data": 5, "telnet": 8, "other": 10, "private": 11,
-		"domain_u": 12, "ntp_u": 14, "http_443": 15, "ldap": 17,
-		"imap4": 20, "pop_3": 21, "sunrpc": 24, "nntp": 28,
-		"whois": 29, "shell": 30, "sql_net": 55, "time": 57,
-		"tftp_u": 68, "icmp": 69, "login": 45, "finger": 7,
-		"echo": 37, "daytime": 34, "discard": 35,
-	}
-	flagCode := map[string]float32{
-		"SF": 0, "S0": 1, "REJ": 2, "RSTO": 3, "RSTS": 4,
-		"SH": 5, "S1": 6, "S2": 7, "S3": 8, "OTH": 9,
-	}
 
 	pc := protoCode[f.key.Protocol]
 	sc := serviceCode[f.service]
@@ -209,20 +274,9 @@ func (f *flowRecord) toFeatures() engine.Features {
 		DstPort:     f.key.DstPort,
 		Protocol:    f.key.Protocol,
 		PacketCount: f.srcPackets + f.dstPackets,
+		Timestamp:   f.lastSeen,
 		Vector:      v,
 	}
 }
 
-func isPrivateIP(ip net.IP) bool {
-	private := []net.IPNet{
-		{IP: net.ParseIP("10.0.0.0"), Mask: net.CIDRMask(8, 32)},
-		{IP: net.ParseIP("172.16.0.0"), Mask: net.CIDRMask(12, 32)},
-		{IP: net.ParseIP("192.168.0.0"), Mask: net.CIDRMask(16, 32)},
-	}
-	for _, block := range private {
-		if block.Contains(ip) {
-			return true
-		}
-	}
-	return false
-}
+

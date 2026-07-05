@@ -1,5 +1,7 @@
 package engine
 
+import "time"
+
 type ClassLabel int
 
 const (
@@ -49,6 +51,7 @@ type Features struct {
 	DstPort     uint16
 	Protocol    string
 	PacketCount int64
+	Timestamp   time.Time
 
 	Vector [41]float32
 }

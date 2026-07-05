@@ -13,14 +13,16 @@ import (
 )
 
 type Engine struct {
-	session   *ort.DynamicAdvancedSession
-	scaler    *Scaler
-	store     store.Store
-	inputCh   chan Features
-	alertCh   chan store.Alert
-	threshold float32
-	wg        sync.WaitGroup
-	mu        sync.RWMutex
+	session       *ort.DynamicAdvancedSession
+	scaler        *Scaler
+	store         store.Store
+	inputCh       chan Features
+	alertCh       chan store.Alert
+	stopCh        chan struct{}
+	threshold     float32
+	droppedAlerts int64
+	wg            sync.WaitGroup
+	mu            sync.RWMutex
 }
 
 type Config struct {
@@ -70,6 +72,7 @@ func New(cfg Config) (*Engine, error) {
 		store:     cfg.Store,
 		inputCh:   make(chan Features, cfg.InputBufferSize),
 		alertCh:   make(chan store.Alert, 64),
+		stopCh:    make(chan struct{}),
 		threshold: cfg.ConfidenceThreshold,
 	}, nil
 }
@@ -80,6 +83,10 @@ func (e *Engine) InputChannel() chan<- Features {
 
 func (e *Engine) AlertChannel() <-chan store.Alert {
 	return e.alertCh
+}
+
+func (e *Engine) Done() <-chan struct{} {
+	return e.stopCh
 }
 
 func (e *Engine) Start(ctx context.Context, iface, sourceType string) error {
@@ -131,8 +138,12 @@ func (e *Engine) process(feat Features) bool {
 		return false
 	}
 
+	ts := feat.Timestamp
+	if ts.IsZero() {
+		ts = time.Now()
+	}
 	alert := store.Alert{
-		Timestamp:  time.Now(),
+		Timestamp:  ts,
 		SrcIP:      feat.SrcIP,
 		DstIP:      feat.DstIP,
 		SrcPort:    feat.SrcPort,
@@ -151,6 +162,9 @@ func (e *Engine) process(feat Features) bool {
 	select {
 	case e.alertCh <- alert:
 	default:
+		e.mu.Lock()
+		e.droppedAlerts++
+		e.mu.Unlock()
 	}
 	return true
 }
@@ -245,6 +259,7 @@ func (e *Engine) SetThreshold(threshold float32) {
 }
 
 func (e *Engine) Stop() error {
+	close(e.stopCh)
 	if e.session != nil {
 		return e.session.Destroy()
 	}
